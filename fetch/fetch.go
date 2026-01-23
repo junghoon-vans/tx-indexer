@@ -228,10 +228,19 @@ func (f *Fetcher) FetchChainData(ctx context.Context) error {
 				f.logger.Error(
 					"error encountered during chunk fetch",
 					zap.String("error", response.error.Error()),
+					zap.Uint64("from", response.chunkRange.from),
+					zap.Uint64("to", response.chunkRange.to),
 				)
+
+				// Remove the failed slot to allow retry
+				if index < f.chunkBuffer.Len() {
+					f.chunkBuffer.removeSlot(index)
+				}
+
+				continue
 			}
 
-			// Save the chunk
+			// Save the chunk only if fetch was successful
 			f.chunkBuffer.setChunk(index, response.chunk)
 
 			for f.chunkBuffer.Len() > 0 {
