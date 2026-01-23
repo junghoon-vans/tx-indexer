@@ -79,7 +79,7 @@ func getBlocksFromBatch(ctx context.Context, chunkRange chunkRange, client Clien
 	}
 
 	// Get the block results
-	blocksRaw, err := batch.Execute(context.Background())
+	blocksRaw, err := batch.Execute(ctx)
 	if err != nil {
 		// Try to fetch sequentially
 		return getBlocksSequentially(ctx, chunkRange, client)
@@ -150,7 +150,7 @@ func getTxResultFromBatch(ctx context.Context, blocks []*types.Block, client Cli
 	}
 
 	// Get the block results
-	blockResultsRaw, err := batch.Execute(context.Background())
+	blockResultsRaw, err := batch.Execute(ctx)
 	if err != nil {
 		// Try to fetch sequentially
 		return getTxResultsSequentially(ctx, blocks, client)
