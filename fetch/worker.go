@@ -101,24 +101,19 @@ func getBlocksFromBatch(ctx context.Context, chunkRange chunkRange, client Clien
 
 // getBlocksSequentially attempts to fetch blocks from the client, using sequential requests
 func getBlocksSequentially(ctx context.Context, chunkRange chunkRange, client Client) ([]*types.Block, error) {
-	var (
-		errs   = make([]error, 0)
-		blocks = make([]*types.Block, 0)
-	)
+	blocks := make([]*types.Block, 0, chunkRange.to-chunkRange.from+1)
 
 	for blockNum := chunkRange.from; blockNum <= chunkRange.to; blockNum++ {
 		// Get block info from the chain
 		block, err := client.GetBlock(ctx, blockNum)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("unable to get block %d, %w", blockNum, err))
-
-			continue
+			return nil, fmt.Errorf("unable to get block %d: %w", blockNum, err)
 		}
 
 		blocks = append(blocks, block.Block)
 	}
 
-	return blocks, errors.Join(errs...)
+	return blocks, nil
 }
 
 // getTxResultFromBatch gets the tx results using batch requests.
@@ -199,10 +194,7 @@ func getTxResultFromBatch(ctx context.Context, blocks []*types.Block, client Cli
 
 // getTxResultsSequentially attempts to fetch tx results from the client, using sequential requests
 func getTxResultsSequentially(ctx context.Context, blocks []*types.Block, client Client) ([][]*types.TxResult, error) {
-	var (
-		errs    = make([]error, 0)
-		results = make([][]*types.TxResult, len(blocks))
-	)
+	results := make([][]*types.TxResult, len(blocks))
 
 	for index, block := range blocks {
 		if block.NumTxs == 0 {
@@ -212,34 +204,25 @@ func getTxResultsSequentially(ctx context.Context, blocks []*types.Block, client
 		// Get the transaction execution results
 		blockResults, err := client.GetBlockResults(ctx, uint64(block.Height))
 		if err != nil {
-			errs = append(
-				errs,
-				fmt.Errorf(
-					"unable to get block results for block %d, %w",
-					block.Height,
-					err,
-				),
-			)
-
-			continue
+			return nil, fmt.Errorf("unable to get block results for block %d: %w", block.Height, err)
 		}
 
 		// Save the transaction result
 		txResults := make([]*types.TxResult, block.NumTxs)
 
-		for index, tx := range block.Txs {
+		for txIndex, tx := range block.Txs {
 			result := &types.TxResult{
 				Height:   block.Height,
-				Index:    uint32(index),
+				Index:    uint32(txIndex),
 				Tx:       tx,
-				Response: blockResults.Results.DeliverTxs[index],
+				Response: blockResults.Results.DeliverTxs[txIndex],
 			}
 
-			txResults[index] = result
+			txResults[txIndex] = result
 		}
 
 		results[index] = txResults
 	}
 
-	return results, errors.Join(errs...)
+	return results, nil
 }
