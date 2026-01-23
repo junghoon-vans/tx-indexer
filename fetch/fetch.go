@@ -260,14 +260,11 @@ func (f *Fetcher) writeSlot(s *slot) error {
 	// Save the fetched data
 	for blockIndex, block := range s.chunk.blocks {
 		if saveErr := wb.SetBlock(block); saveErr != nil {
-			// This is a design choice that really highlights the strain
-			// of keeping legacy testnets running. Current TM2 testnets
-			// have blocks / transactions that are no longer compatible
-			// with latest "master" changes for Amino, so these blocks / txs are ignored,
-			// as opposed to this error being a show-stopper for the fetcher
-			f.logger.Error("unable to save block", zap.String("err", saveErr.Error()))
+			if rErr := wb.Rollback(); rErr != nil {
+				return fmt.Errorf("unable to save block %d: %w, rollback failed: %w", block.Height, saveErr, rErr)
+			}
 
-			continue
+			return fmt.Errorf("unable to save block %d: %w", block.Height, saveErr)
 		}
 
 		f.logger.Debug("Added block data to batch", zap.Int64("number", block.Height))
@@ -278,9 +275,11 @@ func (f *Fetcher) writeSlot(s *slot) error {
 		// Save the fetched transaction results
 		for _, txResult := range txResults {
 			if err := wb.SetTx(txResult); err != nil {
-				f.logger.Error("unable to  save tx", zap.String("err", err.Error()))
+				if rErr := wb.Rollback(); rErr != nil {
+					return fmt.Errorf("unable to save tx in block %d: %w, rollback failed: %w", block.Height, err, rErr)
+				}
 
-				continue
+				return fmt.Errorf("unable to save tx in block %d: %w", block.Height, err)
 			}
 
 			f.logger.Debug(
