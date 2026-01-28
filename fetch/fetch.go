@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gnolang/gno/gno.land/pkg/gnoland"
@@ -138,11 +140,48 @@ func (f *Fetcher) FetchChainData(ctx context.Context) error {
 		f.logger.Error("unable to fetch genesis data", zap.Error(err))
 	}
 
+	var (
+		wg           sync.WaitGroup
+		shutdownFlag atomic.Bool
+		jobChMu      sync.Mutex
+	)
+
+	jobCh := make(chan *workerInfo, DefaultMaxSlots)
 	collectorCh := make(chan *workerResponse, DefaultMaxSlots)
 
+	workerCount := f.maxSlots
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for job := range jobCh {
+				handleChunk(ctx, f.client, job)
+			}
+		}()
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownFlag.Store(true)
+
+		f.logger.Info("Context canceled, closing job channel")
+
+		jobChMu.Lock()
+		close(jobCh)
+		jobChMu.Unlock()
+
+		f.logger.Info("Waiting for workers to finish")
+		wg.Wait()
+
+		f.logger.Info("All workers done, closing result channel")
+		close(collectorCh)
+	}()
+
 	// attemptRangeFetch compares local and remote state
-	// and spawns workers to fetch chunks of the chain
-	attemptRangeFetch := func() error {
+	// and sends chunk fetch jobs to the worker pool
+	attemptRangeFetch := func() error{
 		// Check if there are any free slots
 		if f.chunkBuffer.Len() == f.maxSlots {
 			// Currently no free slot exists
@@ -176,19 +215,36 @@ func (f *Fetcher) FetchChainData(ctx context.Context) error {
 		)
 
 		for _, gap := range gaps {
+			if shutdownFlag.Load() {
+				return nil
+			}
+
 			f.logger.Info(
 				"Fetching range",
 				zap.Uint64("from", gap.from),
 				zap.Uint64("to", gap.to),
 			)
 
-			// Spawn worker
-			info := &workerInfo{
+			job := &workerInfo{
 				chunkRange: gap,
 				resCh:      collectorCh,
 			}
 
-			go handleChunk(ctx, f.client, info)
+			jobChMu.Lock()
+			if shutdownFlag.Load() {
+				jobChMu.Unlock()
+
+				return nil
+			}
+
+			select {
+			case jobCh <- job:
+				jobChMu.Unlock()
+			case <-ctx.Done():
+				jobChMu.Unlock()
+
+				return nil
+			}
 		}
 
 		return nil
@@ -205,16 +261,16 @@ func (f *Fetcher) FetchChainData(ctx context.Context) error {
 
 	for {
 		select {
-		case <-ctx.Done():
-			f.logger.Info("Fetcher service shut down")
-			close(collectorCh)
-
-			return nil
 		case <-ticker.C:
 			if err := attemptRangeFetch(); err != nil {
 				return err
 			}
-		case response := <-collectorCh:
+		case response, ok := <-collectorCh:
+			if !ok {
+				f.logger.Info("All workers completed, shutting down")
+
+				return nil
+			}
 			// Find the slot index.
 			// The reason for this search, is because the underlying
 			// slots are shifted constantly to accommodate new ranges,
