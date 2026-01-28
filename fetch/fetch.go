@@ -228,10 +228,22 @@ func (f *Fetcher) FetchChainData(ctx context.Context) error {
 				f.logger.Error(
 					"error encountered during chunk fetch",
 					zap.String("error", response.error.Error()),
+					zap.Uint64("from", response.chunkRange.from),
+					zap.Uint64("to", response.chunkRange.to),
 				)
+
+				if index < f.chunkBuffer.Len() {
+					f.chunkBuffer.removeSlot(index)
+					f.logger.Info(
+						"Removed failed slot",
+						zap.Uint64("from", response.chunkRange.from),
+						zap.Uint64("to", response.chunkRange.to),
+					)
+				}
+
+				continue
 			}
 
-			// Save the chunk
 			f.chunkBuffer.setChunk(index, response.chunk)
 
 			for f.chunkBuffer.Len() > 0 {
@@ -255,7 +267,21 @@ func (f *Fetcher) FetchChainData(ctx context.Context) error {
 }
 
 func (f *Fetcher) writeSlot(s *slot) error {
+	if len(s.chunk.blocks) == 0 {
+		f.logger.Warn(
+			"No blocks to save in chunk",
+			zap.Uint64("from", s.chunkRange.from),
+			zap.Uint64("to", s.chunkRange.to),
+		)
+
+		return fmt.Errorf("no blocks to save in chunk range %d-%d", s.chunkRange.from, s.chunkRange.to)
+	}
+
 	wb := f.storage.WriteBatch()
+
+	var savedBlockCount int
+
+	var highestSavedHeight int64 = -1
 
 	// Save the fetched data
 	for blockIndex, block := range s.chunk.blocks {
@@ -265,9 +291,15 @@ func (f *Fetcher) writeSlot(s *slot) error {
 			// have blocks / transactions that are no longer compatible
 			// with latest "master" changes for Amino, so these blocks / txs are ignored,
 			// as opposed to this error being a show-stopper for the fetcher
-			f.logger.Error("unable to save block", zap.String("err", saveErr.Error()))
+			f.logger.Error("unable to save block", zap.String("err", saveErr.Error()), zap.Int64("height", block.Height))
 
 			continue
+		}
+
+		savedBlockCount++
+
+		if block.Height > highestSavedHeight {
+			highestSavedHeight = block.Height
 		}
 
 		f.logger.Debug("Added block data to batch", zap.Int64("number", block.Height))
@@ -298,14 +330,23 @@ func (f *Fetcher) writeSlot(s *slot) error {
 		f.events.SignalEvent(event)
 	}
 
+	if savedBlockCount == 0 {
+		if rErr := wb.Rollback(); rErr != nil {
+			return fmt.Errorf("no blocks saved, rollback failed: %w", rErr)
+		}
+
+		return fmt.Errorf("no blocks saved in chunk range %d-%d", s.chunkRange.from, s.chunkRange.to)
+	}
+
 	f.logger.Info(
 		"Added to batch block and tx data for range",
 		zap.Uint64("from", s.chunkRange.from),
 		zap.Uint64("to", s.chunkRange.to),
+		zap.Int("saved_blocks", savedBlockCount),
+		zap.Int64("highest_saved_height", highestSavedHeight),
 	)
 
-	// Save the latest height data
-	if err := wb.SetLatestHeight(s.chunkRange.to); err != nil {
+	if err := wb.SetLatestHeight(uint64(highestSavedHeight)); err != nil{
 		if rErr := wb.Rollback(); rErr != nil {
 			return fmt.Errorf("unable to save latest height info, %w, %w", err, rErr)
 		}
